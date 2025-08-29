@@ -1,0 +1,675 @@
+---
+title: "2_Chicken_Eye_R_Setup.Rmd"
+output: html_document
+---
+
+# Chicken Eye: QA 
+
+Date: July 14 2025
+
+Author: Ben Zazycki
+
+Adapted from: Jared Tangeman
+
+Professor: Dr. Chun Liang
+
+## Workspace Setup
+
+Load packages from library:
+
+```{r}
+library(Seurat)
+library(Signac)
+library(ggpubr)
+library(ggplot2)
+library(future)
+library(DT)
+library(gprofiler2)
+library(scCustomize)
+library(Matrix)
+library(plotly)
+library(ensembldb)
+library(JASPAR2024)
+library(DirichletMultinomial)
+library(TFBSTools)
+library(motifmatchr)
+library(chromVAR)
+library(ggforce)
+library(GenomicRanges)
+library(BSgenomeForge)
+library(BSgenome)
+library(biovizBase)
+library(patchwork)
+library(glmGamPoi)
+library(presto)
+library(GenomeInfoDb)
+library(Biostrings)
+library(rtracklayer)
+library(BSgenome.Ggallus.ensembl.GRCg7b)
+```
+
+## Initial File Inputs
+
+Sequence Info:
+
+```{r}
+seq_info_path <- '/Users/benzazycki/Documents/Research/ChickenEye/GRCg7b.110/GRCg7b.110.SeqInfo.csv'
+seqInfo <- read.csv(seq_info_path)
+seqInfo <- Seqinfo(seqInfo$seqnames, seqlengths = seqInfo$length, isCircular = seqInfo$isCircular, genome = "GRCg7b")
+```
+
+Annotation (from GTF file):
+
+```{r}
+gtf_path <- '/Users/benzazycki/Documents/Research/ChickenEye/GRCg7b.110/GRCg7b.110.gtf'
+edb <- EnsDb(ensDbFromGtf(gtf_path, organism='Gallus_gallus', genomeVersion='bGalGal1.mat.broiler.GRCg7b', version='110'))
+annotation <- GetGRangesFromEnsDb(ensdb = edb, standard.chromosomes = FALSE)
+genome(annotation) <- "GRCg7b"
+```
+
+## Introductory Explanation
+
+ATAC-seq Peaks are genomic regions identified by peak-calling algorithms (like MACS2) as having significant chromatin accessibility. They are stored as a count matrix (cells x peaks), where each value indicates how many ATAC-seq fragments overlap that peak in a given cell. Higher counts in a peak may suggest the chromatin region is more open. Peaks with high counts often overlap TB binding sites, enhancer/promoter, and regulatory elements.
+
+These data represents discrete open chromatin regions (e.g., potential enhancers, and promoters). They are used for identifying differential accessible regions (DARs) and linking peaks to nearby genes (e.g. for motif analysis).
+
+Fragment Files (fragpath_E4 = "E4_atac_fragments.tsv.gz") contains raw fragment data listing all observed DNA fragments from ATAC-seq, with genomic coordinates, cell barcode (linking fragments to cells) and UMI (unique molecular identifier).
+
+In 10xGenomics, cell barcodes are unique sequences (typically 16 bp) added to all molecules (RNA and ATAC) from the same cell during library preparation, allowing cell-level pairing. All reads with the same barcode are assumed to come from one cell. Cell barcodes are used to distinguish real cells from background (e.g., empty droplets) via tools like Cell Ranger.
+
+UMIs (Unique Molecular Identifiers) are short random sequences (typically 10–12 bp) added to individual RNA molecules during reverse transcription. Not present in ATAC-seq data (UMIs are RNA-specific). UMIs distinguish biological duplicates (true transcripts) from technical duplicates (PCR artifacts). Unique UMI counts as one original molecule (e.g., one mRNA transcript).
+
+Fragment Files provide base-pair resolution of chromatin accessibility. They can be Used for: (1) Calculating TSS enrichment and nucleosome signal. (2) Visualizing insert size distributions (e.g., nucleosome-free vs. nucleosome-bound fragments). (3) Recomputing peaks if needed.
+
+Key Differences: Feature ATAC Peaks Fragment Files Format Matrix (cells × peaks) Tab-delimited (chrom, start, end, barcode) Resolution Regions (e.g., 500bp windows) Single-base-pair (exact fragment boundaries) Content Pre-defined open chromatin regions All observed DNA fragments Use Case Peak-based analysis (DARs, motifs) QC, nucleosome positioning, fine-scale analysis.
+
+Peaks are used for quantitative analysis (e.g., "How accessible is PeakX in CellA vs. CellB?"). Fragments are used for quality control (e.g., TSS enrichment) and dynamic analyses (e.g., nucleosome positioning). Using MACS2 or other tool, fragments data were used as the input to do Peak Calling, obtaining Peak set as the output (counts_E4\$Peaks).
+
+Most of this document resolves around Seurat objects which are initially split into separate objects for each developmental stage (E4, E5, E6, E7). Here is an explanation for the naming conventions present throughout this document:
+
+-   `seu_E#_o`: original
+-   `seu_E#`: filtered to only cells present in metadata
+-   `seu_E#_n`: normalized
+-   `seu_E#_f`: filtered
+-   `seu_E#_ff`: filtered twice
+
+## Main Data Reads
+
+In this section, we read in the data we need from external files. Be sure to change this path to what you need it to be.
+
+```{r}
+data_input_path <- '/Users/benzazycki/Documents/Research/ChickenEye/Inputs/'
+```
+
+Load in gene expression data from .h5 files:
+
+```{r}
+counts_E4 <- Read10X_h5(filename = paste0(data_input_path, 'E4_filtered_feature_bc_matrix.h5'))
+counts_E5 <- Read10X_h5(filename = paste0(data_input_path, 'E5_filtered_feature_bc_matrix.h5'))
+counts_E6 <- Read10X_h5(filename = paste0(data_input_path, 'E6_filtered_feature_bc_matrix.h5'))
+counts_E7 <- Read10X_h5(filename = paste0(data_input_path, 'E7_filtered_feature_bc_matrix.h5'))
+```
+
+The 10XGenomics .h5 files contain gene expression counts: Sparse matrix where each row represents a gene and each column contains expressed level (counts) for a given cell identified by a specific barcode. The .h5 file also optionally contains ATAC peaks information, which is our case here.
+
+Initialize original Seurat objects. The Seurat object stores (1) counts: the raw gene expression matrix (2) assay='RNA': specifies that this is RNA-seq data. The following will be automatically calculated: (1) nCount_RNA - Total reads per cell. (2) nFeature_RNA - Genes detected per cell
+
+```{r}
+seu_E4_o <- CreateSeuratObject(counts = counts_E4$`Gene Expression`, assay = "RNA")
+seu_E5_o <- CreateSeuratObject(counts = counts_E5$`Gene Expression`, assay = "RNA")
+seu_E6_o <- CreateSeuratObject(counts = counts_E6$`Gene Expression`, assay = "RNA")
+seu_E7_o <- CreateSeuratObject(counts = counts_E7$`Gene Expression`, assay = "RNA")
+```
+
+Load in genotyping results from CSV files. These files are sort of metadata sheets that contain critical sample information.
+
+```{r}
+key_E4 <- read.csv(paste0(data_input_path, "Genotypes_E4.csv"), row.names = 1)
+key_E5 <- read.csv(paste0(data_input_path, "Genotypes_E5.csv"), row.names = 1)
+key_E6 <- read.csv(paste0(data_input_path, "Genotypes_E6.csv"), row.names = 1)
+key_E7 <- read.csv(paste0(data_input_path, "Genotypes_E7.csv"), row.names = 1)
+```
+
+## Initial Filtering, Editing, and Normalization
+
+This section operates as the first round of QA for our data. First, filter the Seurat objects to keep only the cells present in the metadata we just read in:
+
+```{r}
+seu_E4 <- subset(seu_E4_o, cells = rownames(key_E4))
+seu_E5 <- subset(seu_E5_o, cells = rownames(key_E5))
+seu_E6 <- subset(seu_E6_o, cells = rownames(key_E6))
+seu_E7 <- subset(seu_E7_o, cells = rownames(key_E7))
+```
+
+Reorder the metadata objects to align with the Seurat objects:
+
+```{r}
+key_E4 <- key_E4[rownames(seu_E4@meta.data), ]
+key_E5 <- key_E5[rownames(seu_E5@meta.data), ]
+key_E6 <- key_E6[rownames(seu_E6@meta.data), ]
+key_E7 <- key_E7[rownames(seu_E7@meta.data), ]
+```
+
+Attach genotype metadata to each Seurat object:
+
+```{r}
+seu_E4@meta.data <- cbind(seu_E4@meta.data, key_E4)
+seu_E5@meta.data <- cbind(seu_E5@meta.data, key_E5)
+seu_E6@meta.data <- cbind(seu_E6@meta.data, key_E6)
+seu_E7@meta.data <- cbind(seu_E7@meta.data, key_E7)
+```
+
+Assign an identity to each cell based on developmental stage (E4-E7):
+
+```{r}
+seu_E4@meta.data$orig.ident <- seu_E4@meta.data$Stage
+seu_E5@meta.data$orig.ident <- seu_E5@meta.data$Stage
+seu_E6@meta.data$orig.ident <- seu_E6@meta.data$Stage
+seu_E7@meta.data$orig.ident <- seu_E7@meta.data$Stage
+```
+
+Normalization: Apply Seurat's global-scale log-normalization method. A note here: The single-cell best practices website suggests Centered Log-Ration (CLR) transformation here.
+
+```{r}
+seu_E4_n <- NormalizeData(seu_E4)
+seu_E5_n <- NormalizeData(seu_E5)
+seu_E6_n <- NormalizeData(seu_E6)
+seu_E7_n <- NormalizeData(seu_E7)
+```
+
+Copy over metadata:
+
+```{r}
+seu_E4_n@meta.data <- seu_E4@meta.data
+seu_E5_n@meta.data <- seu_E5@meta.data
+seu_E6_n@meta.data <- seu_E6@meta.data
+seu_E7_n@meta.data <- seu_E7@meta.data
+```
+
+Read in lists of W-linked and mitochondrial genes:
+
+```{r}
+W <- readLines("/Users/benzazycki/Documents/Research/ChickenEye/GRCg7b.110/GRCg7b.110.W.txt")
+MT <- readLines("/Users/benzazycki/Documents/Research/ChickenEye/GRCg7b.110/GRCg7b.110.MT.txt")
+```
+
+Calculate percentage of gene expression that is linked to mitochondrial activity; add to metadata:
+
+```{r}
+seu_E4_n[["percent.mt"]] <- PercentageFeatureSet(seu_E4_n, features = MT)
+seu_E5_n[["percent.mt"]] <- PercentageFeatureSet(seu_E5_n, features = MT)
+seu_E6_n[["percent.mt"]] <- PercentageFeatureSet(seu_E6_n, features = MT)
+seu_E7_n[["percent.mt"]] <- PercentageFeatureSet(seu_E7_n, features = MT)
+```
+
+## Plot-Based Filtering
+
+Now, for all 4 Seurat objects, I will plot (1) number of detected genes per cell, (2) number of RNA molecules per cell, and (3) percentage of mitochondrial expression per cell. These violin plots will then be used for QC filtering. Then, I will do the same plots again with the filtered objects.
+
+E4:
+
+```{r}
+VlnPlot(seu_E4_n, features = c("nFeature_RNA","nCount_RNA", "percent.mt"),
+           ncol = 3, pt.size = 0)
+```
+
+Perform filtering for E4: \* Number of unique genes: between 600 and 7000 \* Number of RNA molecules per cell: Between 1000 and 15000 \* Percentage of counts from mitochondrial genes: below 25%
+
+```{r}
+seu_E4_f <- subset(seu_E4_n,
+  subset = nFeature_RNA > 600 &
+           nFeature_RNA < 7000 &
+           percent.mt < 25 &
+           nCount_RNA > 1000 &
+           nCount_RNA < 15000)
+```
+
+Post-filtering plot:
+
+```{r}
+VlnPlot(seu_E4_f, features = c("nFeature_RNA","nCount_RNA", "percent.mt"),
+           ncol = 3, pt.size = 0)
+```
+
+E5:
+
+```{r}
+VlnPlot(seu_E5_n, features = c("nFeature_RNA","nCount_RNA", "percent.mt"),
+           ncol = 3, pt.size = 0)
+```
+
+Perform filtering for E5: \* Number of unique genes: between 600 and 6000 \* Number of RNA molecules per cell: Between 1000 and 15000 \* Percentage of counts from mitochondrial genes: below 20%
+
+```{r}
+seu_E5_f <- subset(seu_E5_n,
+  subset = nFeature_RNA > 600 &
+           nFeature_RNA < 6000 &
+           percent.mt < 20 &
+           nCount_RNA > 1000 &
+           nCount_RNA < 15000)
+```
+
+Post-filtering plot:
+
+```{r}
+VlnPlot(seu_E5_f, features = c("nFeature_RNA","nCount_RNA", "percent.mt"),
+           ncol = 3, pt.size = 0)
+```
+
+E6:
+
+```{r}
+VlnPlot(seu_E6_n, features = c("nFeature_RNA","nCount_RNA", "percent.mt"),
+           ncol = 3, pt.size = 0)
+```
+
+Perform filtering for E6: \* Number of unique genes: between 300 and 4500 \* Number of RNA molecules per cell: Between 100 and 10000 \* Percentage of counts from mitochondrial genes: below 15%
+
+```{r}
+seu_E6_f <- subset(seu_E6_n,
+  subset = nFeature_RNA > 300 &
+           nFeature_RNA < 4500 &
+           percent.mt < 15 &
+           nCount_RNA > 500 &
+           nCount_RNA < 10000)
+```
+
+Post-filtering plot:
+
+```{r}
+VlnPlot(seu_E6_f, features = c("nFeature_RNA","nCount_RNA", "percent.mt"),
+           ncol = 3, pt.size = 0)
+```
+
+E7:
+
+```{r}
+VlnPlot(seu_E7_n, features = c("nFeature_RNA","nCount_RNA", "percent.mt"),
+           ncol = 3, pt.size = 0)
+```
+
+Perform filtering for E7: \* Number of unique genes: between 600 and 6500 \* Number of RNA molecules per cell: Between 500 and 15000 \* Percentage of counts from mitochondrial genes: below 20%
+
+```{r}
+seu_E7_f <- subset(seu_E7_n,
+  subset = nFeature_RNA > 600 &
+           nFeature_RNA < 6500 &
+           percent.mt < 20 &
+           nCount_RNA > 500 &
+           nCount_RNA < 15000)
+```
+
+Post-filtering plot:
+
+```{r}
+VlnPlot(seu_E7_f, features = c("nFeature_RNA","nCount_RNA", "percent.mt"),
+           ncol = 3, pt.size = 0)
+```
+
+Show merged violin plot to check overall results:
+
+```{r}
+seu_E4_f$stage <- "E4"
+seu_E5_f$stage <- "E5"
+seu_E6_f$stage <- "E6"
+seu_E7_f$stage <- "E7"
+seu_merged_f <- merge(seu_E4_f, y = list(seu_E5_f, seu_E6_f, seu_E7_f),
+                    add.cell.ids = c("E4", "E5", "E6", "E7"))
+Idents(seu_merged_f) <- "stage"
+VlnPlot(seu_merged_f,features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+  pt.size = 0, ncol = 3)
+```
+
+## Adding on ATAC-seq Data
+
+Now, I will add on ATAC-seq data to the already-existing Seurat objects, then do some basic QC/plotting. Quick explanation: ATAC-seq (Assay for Transposase-Accessible Chromatin using sequencing) identifies regions of open chromatin across the genome, revealing where DNA is accessible to regulatory proteins.
+
+First, I will create "atac_E#" objects that hold peak count matrices. These are filtered to only include cells that are also present in the already-filtered RNA assays within the Seurat objects.
+
+```{r}
+atac_E4 <- counts_E4$Peaks[, colnames(counts_E4$Peaks) %in% colnames(seu_E4_f)]
+atac_E5 <- counts_E5$Peaks[, colnames(counts_E5$Peaks) %in% colnames(seu_E5_f)]
+atac_E6 <- counts_E6$Peaks[, colnames(counts_E6$Peaks) %in% colnames(seu_E6_f)]
+atac_E7 <- counts_E7$Peaks[, colnames(counts_E7$Peaks) %in% colnames(seu_E7_f)]
+```
+
+Next, I will use the CreateChromatinAssay() method to add on an ATAC data assay to each Seurat object.
+
+```{r}
+fragpath_E4 <- paste0(data_input_path, "E4_atac_fragments.tsv.gz")
+fragpath_E5 <- paste0(data_input_path, "E5_atac_fragments.tsv.gz")
+fragpath_E6 <- paste0(data_input_path, "E6_atac_fragments.tsv.gz")
+fragpath_E7 <- paste0(data_input_path, "E7_atac_fragments.tsv.gz")
+
+seu_E4_f[["ATAC"]] <- CreateChromatinAssay(counts = atac_E4,
+                                         sep = c(":", "-"),
+                                         fragments = fragpath_E4,
+                                         annotation = annotation)
+seu_E5_f[["ATAC"]] <- CreateChromatinAssay(counts = atac_E5,
+                                         sep = c(":", "-"),
+                                         fragments = fragpath_E5,
+                                         annotation = annotation)
+seu_E6_f[["ATAC"]] <- CreateChromatinAssay(counts = atac_E6,
+                                         sep = c(":", "-"),
+                                         fragments = fragpath_E6,
+                                         annotation = annotation)
+seu_E7_f[["ATAC"]] <- CreateChromatinAssay(counts = atac_E7,
+                                         sep = c(":", "-"),
+                                         fragments = fragpath_E7,
+                                         annotation = annotation)
+```
+
+Next, compute Nuclesosome Signal and TSS Enrichment scores (QC Metrics):
+
+```{r}
+DefaultAssay(seu_E4_f) <- "ATAC"
+DefaultAssay(seu_E5_f) <- "ATAC"
+DefaultAssay(seu_E6_f) <- "ATAC"
+DefaultAssay(seu_E7_f) <- "ATAC"
+
+seu_E4_f <- NucleosomeSignal(seu_E4_f)
+seu_E5_f <- NucleosomeSignal(seu_E5_f)
+seu_E6_f <- NucleosomeSignal(seu_E6_f)
+seu_E7_f <- NucleosomeSignal(seu_E7_f)
+
+seu_E4_f <- TSSEnrichment(seu_E4_f)
+seu_E5_f <- TSSEnrichment(seu_E5_f)
+seu_E6_f <- TSSEnrichment(seu_E6_f)
+seu_E7_f <- TSSEnrichment(seu_E7_f)
+```
+
+Quick QC to specify clean cell stage (E4-E7) data for all samples:
+
+```{r}
+seu_E4_f <- subset(seu_E4_f, subset = orig.ident == "E4")
+seu_E5_f <- subset(seu_E5_f, subset = orig.ident == "E5")
+seu_E6_f <- subset(seu_E6_f, subset = orig.ident == "E6")
+seu_E7_f <- subset(seu_E7_f, subset = orig.ident == "E7")
+```
+
+## ATAC-seq Plotting
+
+Each stage will get 3 more plots:
+
+-   DensityScatter to visualize relationship between ATAC reads and TSS enrichment
+-   Violin plot with RNA counts and ATAC metrics
+-   Histogram to visualize fragment lengths
+
+Then, more QC will be perfomed based on the results.
+
+The fragment histograms show the size distribution of DNA fragments after Tn5 transposase digestion, which is critical for assessing ATAC-seq library quality.
+
+\~200 bp: Mononucleosome fragments (DNA wrapped around 1 nucleosome + linker).
+
+\~400 bp: Dinucleosome fragments (2 nucleosomes + linker).
+
+\<100 bp: Open chromatin (Tn5 cut sites without nucleosomes).
+
+Sharp peak \<100 bp (open chromatin). Smaller peaks at \~200 bp and \~400 bp (nucleosome-associated fragments).
+
+E4:
+
+```{r}
+DensityScatter(seu_E4_f, x = 'nCount_ATAC', y = 'TSS.enrichment', 
+               log_x = TRUE, quantiles = TRUE)
+```
+
+```{r}
+VlnPlot(object = seu_E4_f, features = c("nCount_RNA", "nCount_ATAC", "TSS.enrichment",               "nucleosome_signal"), ncol = 4, pt.size = 0, group.by = "orig.ident")
+```
+
+```{r}
+FragmentHistogram(object = seu_E4_f, region = '1-1-100000000', group.by = "orig.ident", 
+                  assay = "ATAC")
+```
+
+Perform QC:
+
+-   ATAC reads between 500 and 50000
+-   Nucleosome signal less than 1
+-   TSS enrichment betwen 1 and 10
+
+```{r}
+seu_E4_ff <- subset(x = seu_E4_f, subset = nCount_ATAC < 50000 & nCount_ATAC > 500 &
+                      nucleosome_signal < 1 & TSS.enrichment > 1 & TSS.enrichment < 10)
+```
+
+E5:
+
+```{r}
+DensityScatter(seu_E5_f, x = 'nCount_ATAC', y = 'TSS.enrichment', 
+               log_x = TRUE, quantiles = TRUE)
+```
+
+```{r}
+VlnPlot(object = seu_E5_f, features = c("nCount_RNA", "nCount_ATAC",
+                                  "TSS.enrichment", "nucleosome_signal"),
+        ncol = 4, pt.size = 0, group.by = "orig.ident")
+```
+
+```{r}
+FragmentHistogram(object = seu_E5_f, region = '1-1-100000000',
+                  group.by = "orig.ident", assay = "ATAC")
+```
+
+Perform QC:
+
+-   ATAC reads between 500 and 50000
+-   Nucleosome signal less than 1
+-   TSS enrichment betwen 1 and 10
+
+```{r}
+seu_E5_ff <- subset(x = seu_E5_f,
+                subset = nCount_ATAC < 50000 & nCount_ATAC > 500 &
+                nucleosome_signal < 1 &
+                TSS.enrichment > 1 & TSS.enrichment < 10)
+```
+
+E6:
+
+```{r}
+DensityScatter(seu_E6_f, x = 'nCount_ATAC', y = 'TSS.enrichment',
+               log_x = TRUE, quantiles = TRUE)
+```
+
+```{r}
+VlnPlot(object = seu_E6_f, features = c("nCount_RNA", "nCount_ATAC",
+                                  "TSS.enrichment", "nucleosome_signal"),
+        ncol = 4, pt.size = 0, group.by = "orig.ident")
+```
+
+```{r}
+FragmentHistogram(object = seu_E6_f, region = '1-1-100000000',
+                  group.by = "orig.ident", assay = "ATAC")
+```
+
+Perform QC:
+
+-   ATAC reads between 354 and 20000
+-   Nucleosome signal less than 1
+-   TSS enrichment betwen 1 and 10
+
+```{r}
+seu_E6_ff <- subset(x = seu_E6_f,
+                subset = nCount_ATAC < 20000 & nCount_ATAC > 354 &
+                nucleosome_signal < 1 &
+                TSS.enrichment > 1 & TSS.enrichment < 10)
+```
+
+E7:
+
+```{r}
+DensityScatter(seu_E7_f, x = 'nCount_ATAC', y = 'TSS.enrichment',
+               log_x = TRUE, quantiles = TRUE)
+```
+
+```{r}
+VlnPlot(object = seu_E7_f, features = c("nCount_RNA", "nCount_ATAC",
+                                  "TSS.enrichment", "nucleosome_signal"),
+        ncol = 4, pt.size = 0, group.by = "orig.ident")
+```
+
+```{r}
+FragmentHistogram(object = seu_E7_f, region = '1-1-100000000',
+                  group.by = "orig.ident", assay = "ATAC")
+```
+
+Perform QC:
+
+-   ATAC reads between 484 and 30000
+-   Nucleosome signal less than 1
+-   TSS enrichment betwen 1 and 10
+
+```{r}
+seu_E7_ff <- subset(x = seu_E7_f,
+                subset = nCount_ATAC < 30000 & nCount_ATAC > 484 &
+                nucleosome_signal < 1 &
+                TSS.enrichment > 1 & TSS.enrichment < 10)
+```
+
+## Further ATAC Processing
+
+Extract the genomic ranges of peak regions:
+
+```{r}
+peak_E4 <- seu_E4_ff@assays$ATAC@ranges
+peak_E5 <- seu_E5_ff@assays$ATAC@ranges
+peak_E6 <- seu_E6_ff@assays$ATAC@ranges
+peak_E7 <- seu_E7_ff@assays$ATAC@ranges
+```
+
+Combine all of these peaks into one unified set. The use of reduce() here will remove duplicates.
+
+```{r}
+combined.peaks <- reduce(x = c(peak_E4, peak_E5, peak_E6, peak_E7))
+```
+
+Make fragment objects with the CreateFragmentObject() method and fragment input files. Fragments are short pieces of DNA that often indicate where the genome chromatin is accessible/open.
+
+```{r}
+frags.seu_E4_ff <- CreateFragmentObject(
+  path = paste0(data_input_path, 'E4_atac_fragments.tsv.gz'),
+  cells = colnames(seu_E4_ff))
+frags.seu_E5_ff <- CreateFragmentObject(
+  path = paste0(data_input_path, 'E5_atac_fragments.tsv.gz'),
+  cells = colnames(seu_E5_ff))
+frags.seu_E6_ff <- CreateFragmentObject(
+  path = paste0(data_input_path, 'E6_atac_fragments.tsv.gz'),
+  cells = colnames(seu_E6_ff))
+frags.seu_E7_ff <- CreateFragmentObject(
+  path = paste0(data_input_path, 'E7_atac_fragments.tsv.gz'),
+  cells = colnames(seu_E7_ff))
+```
+
+Next, create feature matrix objects. These map the number of reads from a given cell that overlap with a given genomic peak from our combined list of peaks.
+
+```{r}
+seu_E4_ff.counts <- FeatureMatrix(fragments = frags.seu_E4_ff,
+                   features = combined.peaks, cells = colnames(seu_E4_ff))
+seu_E5_ff.counts <- FeatureMatrix(fragments = frags.seu_E5_ff,
+                   features = combined.peaks, cells = colnames(seu_E5_ff))
+seu_E6_ff.counts <- FeatureMatrix(fragments = frags.seu_E6_ff,
+                   features = combined.peaks, cells = colnames(seu_E6_ff))
+seu_E7_ff.counts <- FeatureMatrix(fragments = frags.seu_E7_ff,
+                   features = combined.peaks, cells = colnames(seu_E7_ff))
+```
+
+Now, I will rebuild the ATAC assays using the new objects created in the above two cells.
+
+```{r}
+seu_E4_ff[["ATAC"]]  <- CreateChromatinAssay(seu_E4_ff.counts,
+                        fragments = frags.seu_E4_ff,  annotation = annotation)
+seu_E5_ff[["ATAC"]]  <- CreateChromatinAssay(seu_E5_ff.counts,
+                        fragments = frags.seu_E5_ff,  annotation = annotation)
+seu_E6_ff[["ATAC"]]  <- CreateChromatinAssay(seu_E6_ff.counts,
+                        fragments = frags.seu_E6_ff,  annotation = annotation)
+seu_E7_ff[["ATAC"]]  <- CreateChromatinAssay(seu_E7_ff.counts,
+                        fragments = frags.seu_E7_ff,  annotation = annotation)
+```
+
+## Final (Merged) Processing
+
+Merge the 4 Seurat objects for final processing:
+
+```{r}
+seu_merged <- merge(x = seu_E4_ff, y = list(seu_E5_ff, seu_E6_ff, seu_E7_ff))
+```
+
+Filter to only useful metadata columns:
+
+```{r}
+DefaultAssay(seu_merged) <- "RNA"
+seu_merged@meta.data <- subset(seu_merged@meta.data,
+    select=c(orig.ident, Embryo, Sex, nCount_RNA, nFeature_RNA, nCount_ATAC, nFeature_ATAC))
+```
+
+Join data across layers and normalize:
+
+```{r}
+seu_merged <- JoinLayers(seu_merged)
+seu_merged <- NormalizeData(seu_merged)
+```
+
+Calculate the percentage of RNA reads mapping to mitochondrial and W-linked genes:
+
+```{r}
+seu_merged[["percent.mt"]] <- PercentageFeatureSet(seu_merged, features = MT)
+seu_merged[["percent.w"]] <- PercentageFeatureSet(seu_merged, features = W)
+```
+
+Calculate Nuclesome Signal Score and TSS Enrichment Score for each cell:
+
+```{r}
+DefaultAssay(seu_merged) <- "ATAC"
+seu_merged <- NucleosomeSignal(seu_merged)
+seu_merged <- TSSEnrichment(seu_merged)
+```
+
+Visualize with Count-Enrichment scatter plot:
+
+```{r}
+DensityScatter(seu_merged, x = 'nCount_ATAC', y = 'TSS.enrichment',
+               log_x = TRUE, quantiles = TRUE)
+```
+
+Visualize violin plot with 6 QC values:
+
+```{r}
+VlnPlot(object = seu_merged,
+        features = c("nFeature_RNA",
+                     "nCount_RNA",
+                     "percent.mt",
+                     "nCount_ATAC",
+                     "TSS.enrichment",
+                     "nucleosome_signal"),
+        ncol = 3, pt.size = 0, group.by = "orig.ident")
+```
+
+Next, I will calculate cell cycle phase score AND cell cycle difference score. Cell cycle phase scores are calculated using predefined S phase and G2/M phase marker genes. Cell cycle difference scores are numeric values representing each cell's relative bias towards S phase vs. G2/M.
+
+```{r}
+DefaultAssay(seu_merged) <- "RNA"
+seu_merged <- CellCycleScoring(seu_merged, s.features = cc.genes$s.genes,
+              g2m.features = cc.genes$g2m.genes,set.ident = FALSE)
+seu_merged$CC.Difference <- seu_merged$S.Score - seu_merged$G2M.Score
+```
+
+Perform SCTransform normalization of gene expression:
+
+```{r}
+seu_merged <- SCTransform(seu_merged, assay = "RNA",
+                vars.to.regress = c("CC.Difference", "percent.mt", "percent.w"))
+DefaultAssay(seu_merged) <- "SCT"
+```
+
+## Saving Processed Data
+
+Now, I will demonstrate saving the processed data from this session in order to be used in the next notebook in the pipeline. I will save the merged Seurat object, annotation object, sequence info object, and the R session info.
+
+```{r}
+output_dir <- '/Users/benzazycki/Documents/Research/ChickenEye/Outputs/notebook_2/'
+saveRDS(seu_merged, file = paste0(output_dir, "seu_merged_processed.rds"))
+saveRDS(annotation, file = paste0(output_dir, "annotation.rds"))
+saveRDS(seqInfo, file = paste0(output_dir, "seqInfo.rds"))
+writeLines(capture.output(sessionInfo()), paste0(output_dir, "session_info.txt"))
+```
