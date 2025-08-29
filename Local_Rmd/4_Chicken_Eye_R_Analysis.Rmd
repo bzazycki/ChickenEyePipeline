@@ -1,0 +1,613 @@
+---
+title: "4_Chicken_Eye_R_Analysis.Rmd"
+output: html_document
+---
+
+# Chicken Eye: Analysis 
+
+Date: July 14 2025
+
+Author: Ben Zazycki
+
+Adapted from: Jared Tangeman
+
+Professor: Dr. Chun Liang
+
+## Workspace Setup
+
+Load relevant packages from library:
+
+```{r}
+library(Seurat)
+library(Signac)
+library(ggpubr)
+library(ggplot2)
+library(future)
+library(DT)
+library(gprofiler2)
+library(scCustomize)
+library(Matrix)
+library(plotly)
+library(ensembldb)
+library(JASPAR2024)
+library(DirichletMultinomial)
+library(TFBSTools)
+library(motifmatchr)
+library(chromVAR)
+library(ggforce)
+library(GenomicRanges)
+library(BSgenomeForge)
+library(BSgenome)
+library(biovizBase)
+library(patchwork)
+library(glmGamPoi)
+library(presto)
+library(GenomeInfoDb)
+library(Biostrings)
+library(rtracklayer)
+library(BSgenome.Ggallus.ensembl.GRCg7b)
+```
+
+Load in Seurat object:
+
+```{r}
+rds_input_path <- '/Users/benzazycki/Documents/Research/ChickenEye/Outputs/notebook_3/'
+seu <- readRDS(paste0(output_dir, "seu_clustered.rds"))
+```
+
+Read list of mitochondria-linked genes:
+
+```{r}
+mt_path <- '/Users/benzazycki/Documents/Research/ChickenEye/GRCg7b.110/GRCg7b.110.MT.txt'
+MT <- readLines(mt_path)
+```
+
+## Finding Marker Genes
+
+In the previous notebook, we completed clustering for all 4 methods we're using. In this section, we will find Marker Genes for each cluster--for each method.
+
+Define a list of genes without mitochondrial-linked ones:
+
+```{r}
+test_genes <- rownames(seu)[!rownames(seu) %in% MT]
+```
+
+Call method to identify all positively enriched marker genes across all clusters:
+
+```{r}
+allMarkers <- FindAllMarkers(seu, assay = "RNA", slot = "data", only.pos = T)
+```
+
+Filter the list to only statistically significant markers (by p-value)
+
+```{r}
+allMarkers <- allMarkers[allMarkers$p_val_adj <= 0.05,]
+```
+
+Reorder columns and show data frame info:
+
+```{r}
+allMarkers <- allMarkers[,c(7,6,5,2,3,4,1)]
+str(allMarkers)
+```
+
+Write marker data into a CSV file:
+
+```{r}
+markers_csv_path <- 
+  '/Users/benzazycki/Documents/Research/ChickenEye/Outputs/notebook_4/All_Markers.csv'
+write.csv(allMarkers, file = markers_csv_path)
+```
+
+## Cluster Analysis
+
+IMPORTANT NOTE: At this point in Jared's original pipeline, he judges two of his clusters to be "low-quality", removes them, reruns everything, and then names all of the remaining clusters. If my clusters looked exactly like his, I would copy his work, but they don't (for reasons I don't understand). It's also not clear how he named his clusters. This is unfortunate, because it seems like an important step in his pipeline. I'm going to move forward with all 28 clusters from above and just keeping the numbers, not assigning names.
+
+Show clusters for each assay:
+
+```{r}
+DefaultAssay(seu) <- "RNA"
+DimPlot(seu, label = T, label.box = T, repel = T,
+        reduction = "umap.rna",
+        cols = get_palette("npg", 28)) &
+    NoAxes() & NoLegend() & ggtitle("RNA") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+```{r}
+DefaultAssay(seu) <- "ATAC"
+DimPlot(seu, label = T, label.box = T, repel = T,
+          reduction = "umap.atac",
+          cols = get_palette("npg", 28)) &
+    NoAxes() & NoLegend() & ggtitle("ATAC") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+```{r}
+DefaultAssay(seu) <- "ATAC_IC"
+DimPlot(seu, label = T, label.box = T, repel = T,
+          reduction = "umap.atacIC",
+          cols = get_palette("npg", 28)) &
+    NoAxes() & NoLegend() & ggtitle("ATAC IC") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+```{r}
+DefaultAssay(seu) <- "Gene_Activity"
+DimPlot(seu, label = T, label.box = T, repel = T,
+          reduction = "umap.wnn",
+          cols = get_palette("npg", 28)) &
+    NoAxes() & NoLegend() & ggtitle("Gene Activity") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+Next, plot STAGE for each assay:
+
+```{r}
+DimPlot(seu, group.by = "orig.ident", shuffle = T, reduction = "umap.rna",
+        cols = get_palette("aaas", 5)) &
+  NoAxes() & ggtitle("RNA") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+```{r}
+DimPlot(seu, group.by = "orig.ident", shuffle = T, reduction = "umap.atac",
+        cols = get_palette("aaas", 5)) &
+  NoAxes() & ggtitle("ATAC") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+```{r}
+DimPlot(seu, group.by = "orig.ident", shuffle = T, reduction = "umap.atacIC",
+        cols = get_palette("aaas", 5)) &
+  NoAxes() & ggtitle("ATAC IC") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+```{r}
+DimPlot(seu, group.by = "orig.ident", shuffle = T, reduction = "umap.wnn",
+        cols = get_palette("aaas", 5)) &
+  NoAxes() & ggtitle("Gene Activity") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+Plot PHASE for each assay:
+
+```{r}
+DimPlot(seu, group.by = "Phase", reduction = "umap.rna",
+        shuffle = T) & NoAxes() & ggtitle("RNA") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+```{r}
+DimPlot(seu, group.by = "Phase", reduction = "umap.atac",
+        shuffle = T) & NoAxes() & ggtitle("ATAC") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+```{r}
+DimPlot(seu, group.by = "Phase", reduction = "umap.atacIC",
+        shuffle = T) & NoAxes() & ggtitle("ATAC IC") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+```{r}
+DimPlot(seu, group.by = "Phase", reduction = "umap.wnn",
+        shuffle = T) & NoAxes() & ggtitle("Gene Activity") &
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                       color = NA))
+```
+
+Next, I will show expression levels for specific genes within the WNN Gene Activity reduction. Here are the genes I will be using, they are all from Jared's original notebook:
+
+-   VSX2
+-   PRDM16
+-   OTX2
+-   MITF
+-   THRB
+-   PITX2
+
+```{r}
+FeaturePlot_scCustom(seu, features = c("VSX2"), reduction = "umap.wnn", 
+                     label = "VSX2 Expression on WNN")
+```
+
+```{r}
+FeaturePlot_scCustom(seu, features = c("PRDM16"), reduction = "umap.wnn", 
+                     label = "PRDM16 Expression on WNN")
+```
+
+```{r}
+FeaturePlot_scCustom(seu, features = c("OTX2"), reduction = "umap.wnn", 
+                     label = "OTX2 Expression on WNN")
+```
+
+```{r}
+FeaturePlot_scCustom(seu, features = c("MITF"), reduction = "umap.wnn", 
+                     label = "MITF Expression on WNN")
+```
+
+```{r}
+FeaturePlot_scCustom(seu, features = c("THRB"), reduction = "umap.wnn", 
+                     label = "THRB Expression on WNN")
+```
+
+```{r}
+FeaturePlot_scCustom(seu, features = c("PITX2"), reduction = "umap.wnn", 
+                     label = "PITX2 Expression on WNN")
+```
+
+Finally, I will create a stacked bar plot that shows the proportion of each cluster in each sample, split up by developmental stage. First, make a normalized 2D cluster frequency table:
+
+```{r}
+props <- as.data.frame(Idents(seu))
+props$orig.ident <- seu@meta.data[rownames(props),"orig.ident"]
+colnames(props) <- c("Cluster", "orig.ident")
+props <- as.data.frame(prop.table(table(props), margin = 2))
+```
+
+Then, plot it:
+
+```{r}
+ggplot(props, aes(x = orig.ident, y = Freq, fill = Cluster)) +
+  geom_bar(stat = "identity") + theme_bw() +
+  scale_fill_manual(values = get_palette("npg", 28)) +
+  scale_y_continuous(expand = c(0, 0))
+```
+
+## ChromVAR motif scoring
+
+This next section contains ChromVAR motif scoring. This process is done to figure out which DNA-binding proteins are likely active in different cell groups, based on patterns of chromatin accessibility from the ATAC-IC assay.
+
+First, calculate "regionStats" for each peak. This involves length and proportion of nucleotides that are Guanine or Cytosine.
+
+```{r}
+DefaultAssay(seu) <- "ATAC_IC"
+seu <- RegionStats(seu, genome = BSgenome.Ggallus.ensembl.GRCg7b)
+```
+
+Load known binding motifs from JASPAR database:
+
+```{r}
+set.seed(1234)
+pfm <- getMatrixSet(x = db(JASPAR2024()), opts = list(collection = "CORE",
+                    tax_group = "vertebrates", all_versions = FALSE))
+```
+
+Scan peaks from the ATAC IC assay to find matches:
+
+```{r}
+seu <- AddMotifs(object = seu, genome = BSgenome.Ggallus.ensembl.GRCg7b, pfm = pfm)
+```
+
+This next cell is the most important one from this section. This runs the RunChromVAR() method, which calculates cell-by-cell motif accessibility scores. High scores suggest active regulation by that motif's protein.
+
+```{r}
+seu[["chromvar"]] <- RunChromVAR(object = seu[["ATAC_IC"]], genome = BSgenome.Ggallus.ensembl.GRCg7b)
+```
+
+Finally, this next cell runs the LinkPeaks() method in order to find correlations between chromatin peaks and nearby genes. This links the open transcription regions to genes that are likely connected.
+
+```{r}
+seu <- LinkPeaks(object = seu, distance = 1000000,
+                 peak.assay = "ATAC_IC", peak.slot = "data",
+                 expression.assay = "RNA", expression.slot = "data",
+                 genes.use = unique(allMarkers$gene))
+```
+
+Show heatmap to visualize motif accessibility/expression for the top 20 motifs across all 28 clusters.
+
+```{r}
+top_motifs <- head(rownames(seu[["chromvar"]]), 20)
+DoHeatmap(seu, features = top_motifs, assay = "chromvar", slot = "data")
+```
+
+Next, I will create Coverage Plots for the same 6 genes as above:
+
+-   VSX2
+-   PRDM16
+-   OTX2
+-   MITF
+-   THRB
+-   PITX2
+
+These plots will visualize multiple things, namely:
+
+-   Chromatin accessibility aross specific regions for every cluster
+-   The relevant gene's annotation track
+-   ATAC peaks and the places they're linked to
+
+```{r}
+CoveragePlot(seu, region = c("VSX2"), features = "VSX2",
+             assay = "ATAC_IC", links = T,
+             expression.assay = "RNA", expression.slot = "data",
+             extend.upstream = 20000, extend.downstream = 5000,
+             idents = levels(Idents(seu))[1:28])
+```
+
+```{r}
+CoveragePlot(seu, region = c("PRDM16"), features = "PRDM16",
+             assay = "ATAC_IC", links = T,
+             expression.assay = "RNA", expression.slot = "data",
+             extend.upstream = 20000, extend.downstream = 5000,
+             idents = levels(Idents(seu))[1:28])
+```
+
+```{r}
+CoveragePlot(seu, region = c("OTX2"), features = "OTX2",
+             assay = "ATAC_IC", links = T,
+             expression.assay = "RNA", expression.slot = "data",
+             extend.upstream = 20000, extend.downstream = 5000,
+             idents = levels(Idents(seu))[1:28])
+```
+
+```{r}
+CoveragePlot(seu, region = c("MITF"), features = "MITF",
+             assay = "ATAC_IC", links = T,
+             expression.assay = "RNA", expression.slot = "data",
+             extend.upstream = 20000, extend.downstream = 5000,
+             idents = levels(Idents(seu))[1:28])
+```
+
+```{r}
+CoveragePlot(seu, region = c("THRB"), features = "THRB",
+             assay = "ATAC_IC", links = T,
+             expression.assay = "RNA", expression.slot = "data",
+             extend.upstream = 20000, extend.downstream = 5000,
+             idents = levels(Idents(seu))[1:28])
+```
+
+```{r}
+CoveragePlot(seu, region = c("PITX2"), features = "PITX2",
+             assay = "ATAC_IC", links = T,
+             expression.assay = "RNA", expression.slot = "data",
+             extend.upstream = 20000, extend.downstream = 5000,
+             idents = levels(Idents(seu))[1:28])
+```
+
+For the last part of this section, I will create saved CSV files for all marker genes from the Gene Activity and Chromvar assays.
+
+```{r}
+ga_output_path <- 
+  '/Users/benzazycki/Documents/Research/ChickenEye/Outputs/notebook_4/ga_markers.csv'
+allMarkers_GA <- FindAllMarkers(seu, assay = "Gene_Activity", slot = "data", only.pos = T)
+allMarkers_GA <- allMarkers_GA[allMarkers_GA$p_val_adj <= 0.05,]
+allMarkers_GA <- allMarkers_GA[,c(7,6,5,2,3,4,1)]
+write.csv(allMarkers_GA, ga_output_path)
+```
+
+```{r}
+ch_output_path <- 
+  '/Users/benzazycki/Documents/Research/ChickenEye/Outputs/notebook_4/ch_markers.csv'
+allMarkers_chrom <- FindAllMarkers(seu, assay = "chromvar", slot = "data", only.pos = T)
+allMarkers_chrom <- allMarkers_chrom[allMarkers_chrom$p_val_adj <= 0.05,]
+allMarkers_chrom$motifName <- ConvertMotifID(seu, assay = "ATAC_IC", id = allMarkers_chrom$gene)
+allMarkers_chrom <- allMarkers_chrom[,c(8,7,6,5,2,3,4,1)]
+write.csv(allMarkers_chrom, ch_output_path)
+```
+
+## 3D UMAP Plots
+
+In this section, I demonstrate 3D cluster plots. These are grouped by cell stage, cluster, and cell phase.
+
+```{r}
+seu_3d <- RunUMAP(seu, reduction.name = "umap.wnn",
+                  nn.name = "weighted.nn",
+                  n.components = 3L)
+DefaultAssay(seu_3d) <- "RNA"
+plot.data <- FetchData(object = seu_3d,
+                       vars = c("umapwnn_1","umapwnn_2","umapwnn_3",
+                                "seurat_clusters", "ident",
+                                "orig.ident","Phase"))
+plot.data$label <- paste(rownames(plot.data))
+```
+
+Cell stage:
+
+```{r, warning=FALSE, message=FALSE}
+plot_ly(data = plot.data, x = ~umapwnn_1,
+        y = ~umapwnn_2, z = ~umapwnn_3,
+        color = ~orig.ident,
+        colors = ggpubr::get_palette(palette = "aaas", k = 4),
+        type = "scatter3d", mode = "markers",
+        marker = list(size = 1, width = 1))
+```
+
+Cluster:
+
+```{r, warning=FALSE, message=FALSE}
+plot_ly(data = plot.data, x = ~umapwnn_1,
+        y = ~umapwnn_2, z = ~umapwnn_3,
+        color = ~ident,
+        colors = ggpubr::get_palette(palette = "npg", k = 24), 
+        type = "scatter3d", mode = "markers",
+        marker = list(size = 1, width = 1)) 
+```
+
+Cell phase:
+
+```{r, warning=FALSE, message=FALSE}
+plot_ly(data = plot.data, x = ~umapwnn_1,
+        y = ~umapwnn_2, z = ~umapwnn_3,
+        color = ~Phase,
+        type = "scatter3d", mode = "markers",
+        marker = list(size = 1, width = 1)) 
+```
+
+## Pathway Enrichment Analysis
+
+```{r}
+orth_list <- list()
+for (x in levels(allMarkers$cluster)) {
+  orth <- gorth(query = unique(allMarkers[allMarkers$cluster == x,]$gene),
+                source_organism = "ggallus", target_organism = "mmusculus",
+                mthreshold = 1,
+                filter_na = TRUE)
+  orth_list[[x]] <- unique(orth$ortholog_ensg)}
+
+orth_res <- gost(query = orth_list,
+                 organism = "mmusculus", ordered_query = FALSE,
+                 multi_query = TRUE, significant = TRUE, exclude_iea = FALSE,
+                 measure_underrepresentation = FALSE, evcodes = FALSE,
+                 user_threshold = 0.05, correction_method = "g_SCS",
+                 domain_scope = "annotated", highlight = TRUE)
+orth_res$result <- orth_res$result[orth_res$result$term_size <= 2000,]
+```
+
+```{r}
+gostplot(orth_res, capped = TRUE, interactive = FALSE)
+```
+
+In the two cell blocks above, I demonstrate pathway enrichment analysis, including converting our chicken gene data to mouse orthology. However, the "Manhattan Plot" that is meant to be created with the gost() method isn't showing any data here. Switching the "interactive" option to "TRUE" doesn't fix the problem, it makes the plot not display anything at all.
+
+## Saving Objects as Files
+
+```{r}
+final_output_dir <- '/Users/benzazycki/Documents/Research/ChickenEye/Outputs/notebook_4/'
+saveRDS(seu, file = paste0(final_output_dir, "seu_final.rds"))
+```
+
+In order to save these objects, you need to load the loupeR package and run the setup function:
+
+```{r}
+library(loupeR)
+loupeR::setup()
+```
+
+Begin saving objects:
+
+```{r}
+counts <- counts_matrix_from_assay(seu[["RNA"]])
+create_loupe(counts, clusters = select_clusters(seu),
+             projections = select_projections(seu),
+             output_dir = final_output_dir,
+             output_name = "RNA_Counts")
+```
+
+```{r}
+counts <- counts_matrix_from_assay(seu[["ATAC"]])
+create_loupe(counts, clusters = select_clusters(seu),
+             projections = select_projections(seu),
+             output_dir = final_output_dir,
+             output_name = "ATAC_Counts")
+```
+
+```{r}
+counts <- counts_matrix_from_assay(seu[["ATAC_IC"]])
+create_loupe(counts, clusters = select_clusters(seu),
+             projections = select_projections(seu),
+             output_dir = final_output_dir,
+             output_name = "ATAC_IC_Counts")
+```
+
+```{r}
+counts <- counts_matrix_from_assay(seu[["Gene_Activity"]])
+create_loupe(counts, clusters = select_clusters(seu),
+             projections = select_projections(seu),
+             output_dir = final_output_dir,
+             output_name = "Gene_Activity_Counts")
+```
+
+```{r}
+seu@meta.data$barcode <- rownames(seu@meta.data)
+
+seu@meta.data$UMAP_RNA_1 <- seu@reductions$umap.rna@cell.embeddings[,1]
+seu@meta.data$UMAP_RNA_2 <- seu@reductions$umap.rna@cell.embeddings[,2]
+
+seu@meta.data$UMAP_ATAC_1 <- seu@reductions$umap.atac@cell.embeddings[,1]
+seu@meta.data$UMAP_ATAC_2 <- seu@reductions$umap.atac@cell.embeddings[,2]
+
+seu@meta.data$UMAP_ATAC_IC_1 <- seu@reductions$umap.atacIC@cell.embeddings[,1]
+seu@meta.data$UMAP_ATAC_IC_2 <- seu@reductions$umap.atacIC@cell.embeddings[,2]
+
+seu@meta.data$UMAP_WNN_1 <- seu@reductions$umap.wnn@cell.embeddings[,1]
+seu@meta.data$UMAP_WNN_2 <- seu@reductions$umap.wnn@cell.embeddings[,2]
+
+counts_matrix <- GetAssayData(seu, assay='RNA', layer='counts')
+counts_matrix_logNorm <- GetAssayData(seu, assay='RNA', layer='data')
+
+counts_matrix_ATAC <- GetAssayData(seu, assay='ATAC', layer='counts')
+counts_matrix_ATAC_TFIDF <- GetAssayData(seu, assay='ATAC', layer='data')
+
+counts_matrix_ATAC_IC <- GetAssayData(seu, assay='ATAC_IC', layer='counts')
+counts_matrix_ATAC_IC_TFIDF <- GetAssayData(seu, assay='ATAC_IC', layer='data')
+
+counts_matrix_ATAC_GeneActivity <- GetAssayData(seu, assay='Gene_Activity', layer='counts')
+counts_matrix_ATAC_GeneActivityNorm <- GetAssayData(seu, assay='Gene_Activity', layer='data')
+
+counts_matrix_chromvar <- GetAssayData(seu, assay='chromvar', layer='data')
+```
+
+```{r}
+write.csv(seu@meta.data,
+          file=paste0(final_output_dir, "metadata.csv"),
+          quote=F, row.names=F)
+
+write.table(data.frame('gene'=rownames(counts_matrix)),
+            file=paste0(final_output_dir, "gene_names.csv"),
+            quote=F, row.names=F, col.names=F)
+
+write.csv(seu@reductions$pca@cell.embeddings,
+          file=paste0(final_output_dir, "pca.csv"),
+          quote=F, row.names=F)
+
+write.csv(seu@reductions$lsi@cell.embeddings,
+          file=paste0(final_output_dir, "lsi.csv"),
+          quote=F, row.names=F)
+
+writeMM(counts_matrix,
+        file=paste0(final_output_dir, "raw_RNA_counts.mtx"))
+
+writeMM(counts_matrix_logNorm,
+        file=paste0(final_output_dir, "log_RNA_counts.mtx"))
+
+writeMM(counts_matrix_ATAC,
+        file=paste0(final_output_dir, "raw_ATAC_counts.mtx"))
+
+writeMM(counts_matrix_ATAC_TFIDF,
+        file=paste0(final_output_dir, "TFIDF_ATAC_counts.mtx"))
+
+writeMM(counts_matrix_ATAC_IC,
+        file=paste0(final_output_dir, "raw_ATAC_IC_counts.mtx"))
+
+writeMM(counts_matrix_ATAC_IC_TFIDF,
+        file=paste0(final_output_dir, "TFIDF_ATAC_IC_counts.mtx"))
+
+writeMM(counts_matrix_ATAC_GeneActivity,
+        file=paste0(final_output_dir, "raw_ATAC_GeneActivity_counts.mtx"))
+
+writeMM(counts_matrix_ATAC_GeneActivityNorm,
+        file=paste0(final_output_dir, "log_ATAC_GeneActivity_counts.mtx"))
+
+writeMM(as(counts_matrix_chromvar, "sparseMatrix"),
+        file=paste0(final_output_dir, "chromvar_scores.mtx"))
+```
+
+```{r}
+writeLines(capture.output(sessionInfo()), paste0(final_output_dir, "session_info.txt"))
+```
+
+See ReadMe.txt for conclusions/more info.
